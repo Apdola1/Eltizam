@@ -123,12 +123,19 @@
   }
   .auth-btn:active { transform: scale(.97); }
   .auth-btn.ghost { width: auto; background: rgba(255,255,255,.15); color: #fff; box-shadow: none; padding: 8px 16px; }
-  .auth-btn .g {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 22px; height: 22px; border-radius: 50%; background: #fff;
-    color: #4285F4; font-weight: 800; font-family: Arial, sans-serif;
-    border: 1px solid #e3ebe7;
+  .auth-btn.light { background: rgba(255,255,255,.9); color: #133a2c; }
+  .auth-form {
+    background: rgba(255,255,255,.10); border-radius: 16px; padding: 12px;
+    display: flex; flex-direction: column; gap: 8px; backdrop-filter: blur(6px);
   }
+  .auth-input {
+    width: 100%; border: none; border-radius: 12px; padding: 12px 14px;
+    font-size: 15px; font-family: inherit; background: #fff; color: #133a2c;
+  }
+  .auth-input:focus { outline: 2px solid var(--gold); }
+  .auth-row { display: flex; gap: 8px; }
+  .auth-row .auth-btn { flex: 1; }
+  .auth-msg { color: #f2c94c; font-size: 12px; text-align: center; min-height: 14px; }
   .auth-bar:has(.acc) { display: flex; align-items: center; justify-content: space-between;
     background: rgba(255,255,255,.12); border-radius: 14px; padding: 8px 12px; }
   .acc { display: flex; align-items: center; gap: 10px; color: #fff; font-size: 14px; font-weight: 700; }
@@ -178,7 +185,7 @@
 <script type="module">
 // ===== Firebase =====
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.3.1/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/11.3.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot }
   from "https://www.gstatic.com/firebasejs/11.3.1/firebase-firestore.js";
@@ -196,7 +203,6 @@ const firebaseConfig = {
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
-const provider = new GoogleAuthProvider();
 
 let user = null;         // current signed-in user
 let userDocRef = null;   // Firestore doc for this user
@@ -278,23 +284,53 @@ function renderAuth() {
       <button id="signOutBtn" class="auth-btn ghost">خروج</button>`;
     document.getElementById('signOutBtn').onclick = () => signOut(auth);
   } else {
-    bar.innerHTML = `<button id="signInBtn" class="auth-btn">
-      <span class="g">G</span> تسجيل الدخول بحساب Google للمزامنة</button>`;
-    document.getElementById('signInBtn').onclick = async () => {
-      try { await signInWithPopup(auth, provider); }
-      catch (e) {
-        // popup blocked (common on mobile) → fallback to redirect
-        if (['auth/popup-blocked','auth/cancelled-popup-request','auth/operation-not-supported-in-this-environment'].includes(e.code)) {
-          signInWithRedirect(auth, provider);
-        } else if (e.code !== 'auth/popup-closed-by-user') {
-          setSync('⚠︎ فشل تسجيل الدخول', 'warn');
-        }
-      }
+    bar.innerHTML = `
+      <form id="authForm" class="auth-form" autocomplete="on">
+        <input id="authEmail" class="auth-input" type="email" inputmode="email"
+               placeholder="البريد الإلكتروني" autocomplete="email" required>
+        <input id="authPass" class="auth-input" type="password"
+               placeholder="كلمة المرور (٦ أحرف فأكثر)" autocomplete="current-password" minlength="6" required>
+        <div class="auth-row">
+          <button type="submit" class="auth-btn" data-mode="in">دخول</button>
+          <button type="button" id="signUpBtn" class="auth-btn ghost light">حساب جديد</button>
+        </div>
+        <div id="authMsg" class="auth-msg"></div>
+      </form>`;
+    const form = document.getElementById('authForm');
+    const emailEl = document.getElementById('authEmail');
+    const passEl = document.getElementById('authPass');
+    const submit = async (mode) => {
+      const email = emailEl.value.trim();
+      const pass = passEl.value;
+      if (!email || pass.length < 6) { showAuthMsg('اكتب بريداً صحيحاً وكلمة مرور من ٦ أحرف فأكثر'); return; }
+      showAuthMsg('… جارِ المعالجة');
+      try {
+        if (mode === 'up') await createUserWithEmailAndPassword(auth, email, pass);
+        else await signInWithEmailAndPassword(auth, email, pass);
+      } catch (e) { showAuthMsg(authErrorText(e.code)); }
     };
+    form.onsubmit = (ev) => { ev.preventDefault(); submit('in'); };
+    document.getElementById('signUpBtn').onclick = () => submit('up');
   }
 }
 
-getRedirectResult(auth).catch(() => {});
+function showAuthMsg(t) { const m = document.getElementById('authMsg'); if (m) m.textContent = t; }
+
+function authErrorText(code) {
+  switch (code) {
+    case 'auth/invalid-email': return 'صيغة البريد غير صحيحة';
+    case 'auth/email-already-in-use': return 'البريد مسجّل مسبقاً — اضغط «دخول»';
+    case 'auth/weak-password': return 'كلمة المرور ضعيفة (٦ أحرف فأكثر)';
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found': return 'البريد أو كلمة المرور غير صحيحة';
+    case 'auth/too-many-requests': return 'محاولات كثيرة — انتظر قليلاً ثم أعد المحاولة';
+    case 'auth/network-request-failed': return 'تعذّر الاتصال بالشبكة';
+    case 'auth/operation-not-allowed': return 'فعّل «البريد/كلمة المرور» في إعدادات Firebase';
+    default: return 'تعذّر تسجيل الدخول، حاول مجدداً';
+  }
+}
+
 onAuthStateChanged(auth, (u) => { if (u) onSignedIn(u); else onSignedOut(); });
 
 // ===== App =====
