@@ -112,6 +112,30 @@
     font-size: 14px; cursor: pointer;
   }
   footer { text-align: center; color: #bfe3d4; font-size: 12px; margin-top: 26px; }
+
+  /* auth */
+  .auth-bar { margin-bottom: 8px; }
+  .auth-btn {
+    width: 100%; border: none; border-radius: 14px; padding: 12px 14px;
+    background: #fff; color: #133a2c; font-size: 14px; font-weight: 700;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+    box-shadow: var(--shadow); transition: .15s;
+  }
+  .auth-btn:active { transform: scale(.97); }
+  .auth-btn.ghost { width: auto; background: rgba(255,255,255,.15); color: #fff; box-shadow: none; padding: 8px 16px; }
+  .auth-btn .g {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%; background: #fff;
+    color: #4285F4; font-weight: 800; font-family: Arial, sans-serif;
+    border: 1px solid #e3ebe7;
+  }
+  .auth-bar:has(.acc) { display: flex; align-items: center; justify-content: space-between;
+    background: rgba(255,255,255,.12); border-radius: 14px; padding: 8px 12px; }
+  .acc { display: flex; align-items: center; gap: 10px; color: #fff; font-size: 14px; font-weight: 700; }
+  .avatar { width: 30px; height: 30px; border-radius: 50%; }
+  .sync { text-align: center; font-size: 12px; color: #bfe3d4; margin-bottom: 14px; }
+  .sync.ok { color: #9fe7c4; }
+  .sync.warn { color: #f2c94c; }
 </style>
 </head>
 <body>
@@ -120,6 +144,9 @@
     <h1>التزام</h1>
     <div class="sub">تابع صلواتك الخمس والتزامك بأوقاتها</div>
   </header>
+
+  <div id="authBar" class="auth-bar"></div>
+  <div id="syncState" class="sync">محلي فقط</div>
 
   <div class="datebar">
     <button id="prevDay" aria-label="اليوم السابق">›</button>
@@ -148,7 +175,129 @@
   <footer>بياناتك محفوظة على جهازك فقط · اللهم اجعلنا من المحافظين على الصلاة</footer>
 </div>
 
-<script>
+<script type="module">
+// ===== Firebase =====
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.3.1/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/11.3.1/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot }
+  from "https://www.gstatic.com/firebasejs/11.3.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCGu4jbeaO_qRIHWS-8E-dIn-fpWXdIA_k",
+  authDomain: "eltizam-ab.firebaseapp.com",
+  projectId: "eltizam-ab",
+  storageBucket: "eltizam-ab.firebasestorage.app",
+  messagingSenderId: "400305927841",
+  appId: "1:400305927841:web:c762d94d38dedd5222a2e0",
+  measurementId: "G-B0ML3G3PJS"
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const db = getFirestore(fbApp);
+const provider = new GoogleAuthProvider();
+
+let user = null;         // current signed-in user
+let userDocRef = null;   // Firestore doc for this user
+let unsub = null;        // realtime listener unsubscribe
+let applyingRemote = false; // guard to avoid write-echo loops
+
+// merge two data objects (day -> {prayer: state}); incomingWins decides conflicts
+function mergeData(base, incoming, incomingWins) {
+  const out = JSON.parse(JSON.stringify(base || {}));
+  for (const [day, prayers] of Object.entries(incoming || {})) {
+    out[day] = out[day] || {};
+    for (const [pk, st] of Object.entries(prayers)) {
+      if (incomingWins || !(pk in out[day])) out[day][pk] = st;
+    }
+    if (Object.keys(out[day]).length === 0) delete out[day];
+  }
+  return out;
+}
+
+function setSync(text, cls) {
+  const el = document.getElementById('syncState');
+  if (el) { el.textContent = text; el.className = 'sync ' + (cls || ''); }
+}
+
+async function pushToCloud() {
+  if (!userDocRef) return;
+  try {
+    await setDoc(userDocRef, { days: data, updatedAt: Date.now() }, { merge: false });
+    setSync('☁︎ متزامن', 'ok');
+  } catch (e) {
+    setSync('⚠︎ لم تتم المزامنة (سيُعاد المحاولة)', 'warn');
+  }
+}
+
+async function onSignedIn(u) {
+  user = u;
+  userDocRef = doc(db, 'users', u.uid);
+  renderAuth();
+  setSync('… جارِ المزامنة', '');
+  try {
+    // 1) pull remote once, union with local (local wins to keep offline edits)
+    const snap = await getDoc(userDocRef);
+    const remote = snap.exists() ? (snap.data().days || {}) : {};
+    data = mergeData(data, remote, false);
+    save(true); render();
+    // 2) push merged result up
+    await pushToCloud();
+    // 3) live-sync future changes from other devices
+    if (unsub) unsub();
+    unsub = onSnapshot(userDocRef, (s) => {
+      if (!s.exists()) return;
+      const remoteDays = s.data().days || {};
+      applyingRemote = true;
+      data = mergeData(data, remoteDays, true);
+      save(true); render();
+      applyingRemote = false;
+      setSync('☁︎ متزامن', 'ok');
+    });
+  } catch (e) {
+    setSync('⚠︎ تعذّر الاتصال', 'warn');
+  }
+}
+
+function onSignedOut() {
+  user = null; userDocRef = null;
+  if (unsub) { unsub(); unsub = null; }
+  renderAuth();
+  setSync('محلي فقط', '');
+}
+
+function renderAuth() {
+  const bar = document.getElementById('authBar');
+  if (!bar) return;
+  if (user) {
+    const name = user.displayName || user.email || 'مستخدم';
+    const photo = user.photoURL ? `<img src="${user.photoURL}" alt="" class="avatar">` : '👤';
+    bar.innerHTML = `
+      <div class="acc">${photo}<span>${name}</span></div>
+      <button id="signOutBtn" class="auth-btn ghost">خروج</button>`;
+    document.getElementById('signOutBtn').onclick = () => signOut(auth);
+  } else {
+    bar.innerHTML = `<button id="signInBtn" class="auth-btn">
+      <span class="g">G</span> تسجيل الدخول بحساب Google للمزامنة</button>`;
+    document.getElementById('signInBtn').onclick = async () => {
+      try { await signInWithPopup(auth, provider); }
+      catch (e) {
+        // popup blocked (common on mobile) → fallback to redirect
+        if (['auth/popup-blocked','auth/cancelled-popup-request','auth/operation-not-supported-in-this-environment'].includes(e.code)) {
+          signInWithRedirect(auth, provider);
+        } else if (e.code !== 'auth/popup-closed-by-user') {
+          setSync('⚠︎ فشل تسجيل الدخول', 'warn');
+        }
+      }
+    };
+  }
+}
+
+getRedirectResult(auth).catch(() => {});
+onAuthStateChanged(auth, (u) => { if (u) onSignedIn(u); else onSignedOut(); });
+
+// ===== App =====
 const PRAYERS = [
   { key: 'fajr',    name: 'الفجر',   icon: '🌅' },
   { key: 'dhuhr',   name: 'الظهر',   icon: '☀️' },
@@ -165,7 +314,11 @@ function load() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
   catch { return {}; }
 }
-function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+function save(localOnly) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  // push to cloud on user-initiated changes (not while applying remote snapshots)
+  if (!localOnly && userDocRef && !applyingRemote) pushToCloud();
+}
 
 function dayKey(d) {
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
